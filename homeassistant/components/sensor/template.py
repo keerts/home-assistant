@@ -6,20 +6,18 @@ https://home-assistant.io/components/sensor.template/
 """
 import logging
 
-from homeassistant.components.sensor import DOMAIN
+from homeassistant.components.sensor import ENTITY_ID_FORMAT
 from homeassistant.const import (
-    ATTR_FRIENDLY_NAME, ATTR_UNIT_OF_MEASUREMENT, CONF_VALUE_TEMPLATE)
-from homeassistant.core import EVENT_STATE_CHANGED
+    ATTR_FRIENDLY_NAME, ATTR_UNIT_OF_MEASUREMENT, CONF_VALUE_TEMPLATE,
+    ATTR_ENTITY_ID, MATCH_ALL)
 from homeassistant.exceptions import TemplateError
 from homeassistant.helpers.entity import Entity, generate_entity_id
 from homeassistant.helpers import template
+from homeassistant.helpers.event import track_state_change
 from homeassistant.util import slugify
-
-ENTITY_ID_FORMAT = DOMAIN + '.{}'
 
 _LOGGER = logging.getLogger(__name__)
 CONF_SENSORS = 'sensors'
-STATE_ERROR = 'error'
 
 
 # pylint: disable=unused-argument
@@ -48,13 +46,16 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
                 "Missing %s for sensor %s", CONF_VALUE_TEMPLATE, device)
             continue
 
+        entity_ids = device_config.get(ATTR_ENTITY_ID, MATCH_ALL)
+
         sensors.append(
             SensorTemplate(
                 hass,
                 device,
                 friendly_name,
                 unit_of_measurement,
-                state_template)
+                state_template,
+                entity_ids)
             )
     if not sensors:
         _LOGGER.error("No sensors added")
@@ -68,23 +69,24 @@ class SensorTemplate(Entity):
 
     # pylint: disable=too-many-arguments
     def __init__(self, hass, device_id, friendly_name, unit_of_measurement,
-                 state_template):
+                 state_template, entity_ids):
         """Initialize the sensor."""
+        self.hass = hass
         self.entity_id = generate_entity_id(ENTITY_ID_FORMAT, device_id,
                                             hass=hass)
-
-        self.hass = hass
         self._name = friendly_name
         self._unit_of_measurement = unit_of_measurement
         self._template = state_template
-        self.update()
-        self.hass.bus.listen(EVENT_STATE_CHANGED, self._event_listener)
+        self._state = None
 
-    def _event_listener(self, event):
-        """Called when the target device changes state."""
-        if not hasattr(self, 'hass'):
-            return
-        self.update_ha_state(True)
+        self.update()
+
+        def template_sensor_state_listener(entity, old_state, new_state):
+            """Called when the target device changes state."""
+            self.update_ha_state(True)
+
+        track_state_change(hass, entity_ids,
+                           template_sensor_state_listener)
 
     @property
     def name(self):
@@ -111,10 +113,10 @@ class SensorTemplate(Entity):
         try:
             self._state = template.render(self.hass, self._template)
         except TemplateError as ex:
-            self._state = STATE_ERROR
             if ex.args and ex.args[0].startswith(
                     "UndefinedError: 'None' has no attribute"):
                 # Common during HA startup - so just a warning
                 _LOGGER.warning(ex)
                 return
+            self._state = None
             _LOGGER.error(ex)

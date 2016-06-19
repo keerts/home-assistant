@@ -6,23 +6,17 @@ https://home-assistant.io/components/sensor.netatmo/
 """
 import logging
 from datetime import timedelta
-
-from homeassistant.components.sensor import DOMAIN
-from homeassistant.const import (
-    CONF_API_KEY, CONF_PASSWORD, CONF_USERNAME, TEMP_CELCIUS)
-from homeassistant.helpers import validate_config
+from homeassistant.const import TEMP_CELSIUS
 from homeassistant.helpers.entity import Entity
 from homeassistant.util import Throttle
+from homeassistant.loader import get_component
 
-REQUIREMENTS = [
-    'https://github.com/HydrelioxGitHub/netatmo-api-python/archive/'
-    '43ff238a0122b0939a0dc4e8836b6782913fb6e2.zip'
-    '#lnetatmo==0.4.0']
+DEPENDENCIES = ["netatmo"]
 
 _LOGGER = logging.getLogger(__name__)
 
 SENSOR_TYPES = {
-    'temperature': ['Temperature', TEMP_CELCIUS, 'mdi:thermometer'],
+    'temperature': ['Temperature', TEMP_CELSIUS, 'mdi:thermometer'],
     'co2':         ['CO2', 'ppm', 'mdi:cloud'],
     'pressure':    ['Pressure', 'mbar', 'mdi:gauge'],
     'noise':       ['Noise', 'dB', 'mdi:volume-high'],
@@ -32,7 +26,7 @@ SENSOR_TYPES = {
     'sum_rain_24': ['sum_rain_24', 'mm', 'mdi:weather-rainy'],
 }
 
-CONF_SECRET_KEY = 'secret_key'
+CONF_STATION = 'station'
 ATTR_MODULE = 'modules'
 
 # Return cached results if last scan was less then this time ago
@@ -42,29 +36,9 @@ MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=600)
 
 
 def setup_platform(hass, config, add_devices, discovery_info=None):
-    """Setup the NetAtmo sensor."""
-    if not validate_config({DOMAIN: config},
-                           {DOMAIN: [CONF_API_KEY,
-                                     CONF_USERNAME,
-                                     CONF_PASSWORD,
-                                     CONF_SECRET_KEY]},
-                           _LOGGER):
-        return None
-
-    import lnetatmo
-
-    authorization = lnetatmo.ClientAuth(config.get(CONF_API_KEY, None),
-                                        config.get(CONF_SECRET_KEY, None),
-                                        config.get(CONF_USERNAME, None),
-                                        config.get(CONF_PASSWORD, None))
-
-    if not authorization:
-        _LOGGER.error(
-            "Connection error "
-            "Please check your settings for NatAtmo API.")
-        return False
-
-    data = NetAtmoData(authorization)
+    """Setup the available Netatmo weather sensors."""
+    netatmo = get_component('netatmo')
+    data = NetAtmoData(netatmo.NETATMO_AUTH, config.get(CONF_STATION, None))
 
     dev = []
     try:
@@ -149,10 +123,11 @@ class NetAtmoSensor(Entity):
 class NetAtmoData(object):
     """Get the latest data from NetAtmo."""
 
-    def __init__(self, auth):
+    def __init__(self, auth, station):
         """Initialize the data object."""
         self.auth = auth
         self.data = None
+        self.station = station
 
     def get_module_names(self):
         """Return all module available on the API as a list."""
@@ -164,4 +139,8 @@ class NetAtmoData(object):
         """Call the NetAtmo API to update the data."""
         import lnetatmo
         dev_list = lnetatmo.DeviceList(self.auth)
-        self.data = dev_list.lastData(exclude=3600)
+
+        if self.station is not None:
+            self.data = dev_list.lastData(station=self.station, exclude=3600)
+        else:
+            self.data = dev_list.lastData(exclude=3600)

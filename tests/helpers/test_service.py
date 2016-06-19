@@ -2,6 +2,8 @@
 import unittest
 from unittest.mock import patch
 
+# To prevent circular import when running just this file
+import homeassistant.components  # noqa
 from homeassistant import core as ha, loader
 from homeassistant.const import STATE_ON, STATE_OFF, ATTR_ENTITY_ID
 from homeassistant.helpers import service
@@ -33,6 +35,47 @@ class TestServiceHelpers(unittest.TestCase):
         self.hass.services.call('test', 'test')
         self.hass.pool.block_till_done()
         self.assertEqual(1, len(runs))
+
+    def test_template_service_call(self):
+        """Test service call with tempating."""
+        config = {
+            'service_template': '{{ \'test_domain.test_service\' }}',
+            'entity_id': 'hello.world',
+            'data_template': {
+                'hello': '{{ \'goodbye\' }}',
+            },
+        }
+        runs = []
+
+        decor = service.service('test_domain', 'test_service')
+        decor(lambda x, y: runs.append(y))
+
+        service.call_from_config(self.hass, config)
+        self.hass.pool.block_till_done()
+
+        self.assertEqual('goodbye', runs[0].data['hello'])
+
+    def test_passing_variables_to_templates(self):
+        """Test passing variables to templates."""
+        config = {
+            'service_template': '{{ var_service }}',
+            'entity_id': 'hello.world',
+            'data_template': {
+                'hello': '{{ var_data }}',
+            },
+        }
+        runs = []
+
+        decor = service.service('test_domain', 'test_service')
+        decor(lambda x, y: runs.append(y))
+
+        service.call_from_config(self.hass, config, variables={
+            'var_service': 'test_domain.test_service',
+            'var_data': 'goodbye',
+        })
+        self.hass.pool.block_till_done()
+
+        self.assertEqual('goodbye', runs[0].data['hello'])
 
     def test_split_entity_string(self):
         """Test splitting of entity string."""

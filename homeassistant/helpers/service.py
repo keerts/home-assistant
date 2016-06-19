@@ -2,15 +2,21 @@
 import functools
 import logging
 
+import voluptuous as vol
+
 from homeassistant.const import ATTR_ENTITY_ID
-from homeassistant.helpers.entity import split_entity_id
+from homeassistant.exceptions import TemplateError
+from homeassistant.helpers import template
 from homeassistant.loader import get_component
+import homeassistant.helpers.config_validation as cv
 
 HASS = None
 
 CONF_SERVICE = 'service'
+CONF_SERVICE_TEMPLATE = 'service_template'
 CONF_SERVICE_ENTITY_ID = 'entity_id'
 CONF_SERVICE_DATA = 'data'
+CONF_SERVICE_DATA_TEMPLATE = 'data_template'
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,34 +32,40 @@ def service(domain, service_name):
     return register_service_decorator
 
 
-def call_from_config(hass, config, blocking=False):
+def call_from_config(hass, config, blocking=False, variables=None,
+                     validate_config=True):
     """Call a service based on a config hash."""
-    if not isinstance(config, dict) or CONF_SERVICE not in config:
-        _LOGGER.error('Missing key %s: %s', CONF_SERVICE, config)
-        return
+    if validate_config:
+        try:
+            config = cv.SERVICE_SCHEMA(config)
+        except vol.Invalid as ex:
+            _LOGGER.error("Invalid config for calling service: %s", ex)
+            return
 
-    try:
-        domain, service_name = split_entity_id(config[CONF_SERVICE])
-    except ValueError:
-        _LOGGER.error('Invalid service specified: %s', config[CONF_SERVICE])
-        return
-
-    service_data = config.get(CONF_SERVICE_DATA)
-
-    if service_data is None:
-        service_data = {}
-    elif isinstance(service_data, dict):
-        service_data = dict(service_data)
+    if CONF_SERVICE in config:
+        domain_service = config[CONF_SERVICE]
     else:
-        _LOGGER.error("%s should be a dictionary", CONF_SERVICE_DATA)
-        service_data = {}
+        try:
+            domain_service = template.render(
+                hass, config[CONF_SERVICE_TEMPLATE], variables)
+            domain_service = cv.service(domain_service)
+        except TemplateError as ex:
+            _LOGGER.error('Error rendering service name template: %s', ex)
+            return
+        except vol.Invalid as ex:
+            _LOGGER.error('Template rendered invalid service: %s',
+                          domain_service)
+            return
 
-    entity_id = config.get(CONF_SERVICE_ENTITY_ID)
-    if isinstance(entity_id, str):
-        service_data[ATTR_ENTITY_ID] = [ent.strip() for ent in
-                                        entity_id.split(",")]
-    elif entity_id is not None:
-        service_data[ATTR_ENTITY_ID] = entity_id
+    domain, service_name = domain_service.split('.', 1)
+    service_data = dict(config.get(CONF_SERVICE_DATA, {}))
+
+    if CONF_SERVICE_DATA_TEMPLATE in config:
+        for key, value in config[CONF_SERVICE_DATA_TEMPLATE].items():
+            service_data[key] = template.render(hass, value, variables)
+
+    if CONF_SERVICE_ENTITY_ID in config:
+        service_data[ATTR_ENTITY_ID] = config[CONF_SERVICE_ENTITY_ID]
 
     hass.services.call(domain, service_name, service_data, blocking)
 

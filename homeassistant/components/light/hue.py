@@ -32,6 +32,9 @@ PHUE_CONFIG_FILE = "phue.conf"
 _CONFIGURING = {}
 _LOGGER = logging.getLogger(__name__)
 
+# Track previously setup bridges
+_CONFIGURED_BRIDGES = {}
+
 
 def _find_host_from_config(hass, filename=PHUE_CONFIG_FILE):
     """Attempt to detect host based on existing configuration."""
@@ -53,6 +56,8 @@ def _find_host_from_config(hass, filename=PHUE_CONFIG_FILE):
 def setup_platform(hass, config, add_devices_callback, discovery_info=None):
     """Setup the Hue lights."""
     filename = config.get(CONF_FILENAME, PHUE_CONFIG_FILE)
+    allow_unreachable = config.get('allow_unreachable', False)
+
     if discovery_info is not None:
         host = urlparse(discovery_info[1]).hostname
     else:
@@ -66,13 +71,15 @@ def setup_platform(hass, config, add_devices_callback, discovery_info=None):
             return False
 
     # Only act if we are not already configuring this host
-    if host in _CONFIGURING:
+    if host in _CONFIGURING or \
+            socket.gethostbyname(host) in _CONFIGURED_BRIDGES:
         return
 
-    setup_bridge(host, hass, add_devices_callback, filename)
+    setup_bridge(host, hass, add_devices_callback, filename, allow_unreachable)
 
 
-def setup_bridge(host, hass, add_devices_callback, filename):
+def setup_bridge(host, hass, add_devices_callback, filename,
+                 allow_unreachable):
     """Setup a phue bridge based on host parameter."""
     import phue
 
@@ -88,7 +95,8 @@ def setup_bridge(host, hass, add_devices_callback, filename):
     except phue.PhueRegistrationException:
         _LOGGER.warning("Connected to Hue at %s but not registered.", host)
 
-        request_configuration(host, hass, add_devices_callback, filename)
+        request_configuration(host, hass, add_devices_callback, filename,
+                              allow_unreachable)
 
         return
 
@@ -130,7 +138,7 @@ def setup_bridge(host, hass, add_devices_callback, filename):
             if light_id not in lights:
                 lights[light_id] = HueLight(int(light_id), info,
                                             bridge, update_lights,
-                                            bridge_type=bridge_type)
+                                            bridge_type, allow_unreachable)
                 new_lights.append(lights[light_id])
             else:
                 lights[light_id].info = info
@@ -138,10 +146,12 @@ def setup_bridge(host, hass, add_devices_callback, filename):
         if new_lights:
             add_devices_callback(new_lights)
 
+    _CONFIGURED_BRIDGES[socket.gethostbyname(host)] = True
     update_lights()
 
 
-def request_configuration(host, hass, add_devices_callback, filename):
+def request_configuration(host, hass, add_devices_callback, filename,
+                          allow_unreachable):
     """Request configuration steps from the user."""
     configurator = get_component('configurator')
 
@@ -155,7 +165,8 @@ def request_configuration(host, hass, add_devices_callback, filename):
     # pylint: disable=unused-argument
     def hue_configuration_callback(data):
         """The actions to do when our configuration callback is called."""
-        setup_bridge(host, hass, add_devices_callback, filename)
+        setup_bridge(host, hass, add_devices_callback, filename,
+                     allow_unreachable)
 
     _CONFIGURING[host] = configurator.request_config(
         hass, "Philips Hue", hue_configuration_callback,
@@ -171,13 +182,15 @@ class HueLight(Light):
 
     # pylint: disable=too-many-arguments
     def __init__(self, light_id, info, bridge, update_lights,
-                 bridge_type='hue'):
+                 bridge_type, allow_unreachable):
         """Initialize the light."""
         self.light_id = light_id
         self.info = info
         self.bridge = bridge
         self.update_lights = update_lights
         self.bridge_type = bridge_type
+
+        self.allow_unreachable = allow_unreachable
 
     @property
     def unique_id(self):
@@ -209,7 +222,11 @@ class HueLight(Light):
     def is_on(self):
         """Return true if device is on."""
         self.update_lights()
-        return self.info['state']['reachable'] and self.info['state']['on']
+
+        if self.allow_unreachable:
+            return self.info['state']['on']
+        else:
+            return self.info['state']['reachable'] and self.info['state']['on']
 
     def turn_on(self, **kwargs):
         """Turn the specified or all lights on."""
@@ -218,14 +235,16 @@ class HueLight(Light):
         if ATTR_TRANSITION in kwargs:
             command['transitiontime'] = kwargs[ATTR_TRANSITION] * 10
 
-        if ATTR_BRIGHTNESS in kwargs:
-            command['bri'] = kwargs[ATTR_BRIGHTNESS]
-
         if ATTR_XY_COLOR in kwargs:
             command['xy'] = kwargs[ATTR_XY_COLOR]
         elif ATTR_RGB_COLOR in kwargs:
-            command['xy'] = color_util.color_RGB_to_xy(
+            xyb = color_util.color_RGB_to_xy(
                 *(int(val) for val in kwargs[ATTR_RGB_COLOR]))
+            command['xy'] = xyb[0], xyb[1]
+            command['bri'] = xyb[2]
+
+        if ATTR_BRIGHTNESS in kwargs:
+            command['bri'] = kwargs[ATTR_BRIGHTNESS]
 
         if ATTR_COLOR_TEMP in kwargs:
             command['ct'] = kwargs[ATTR_COLOR_TEMP]

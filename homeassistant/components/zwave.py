@@ -4,15 +4,17 @@ Support for Z-Wave.
 For more details about this component, please refer to the documentation at
 https://home-assistant.io/components/zwave/
 """
+import logging
 import os.path
-import sys
+import time
 from pprint import pprint
 
-from homeassistant import bootstrap
+from homeassistant.helpers import discovery
 from homeassistant.const import (
-    ATTR_BATTERY_LEVEL, ATTR_DISCOVERED, ATTR_ENTITY_ID, ATTR_LOCATION,
-    ATTR_SERVICE, CONF_CUSTOMIZE, EVENT_HOMEASSISTANT_START,
-    EVENT_HOMEASSISTANT_STOP, EVENT_PLATFORM_DISCOVERED)
+    ATTR_BATTERY_LEVEL, ATTR_ENTITY_ID, ATTR_LOCATION,
+    CONF_CUSTOMIZE, EVENT_HOMEASSISTANT_START,
+    EVENT_HOMEASSISTANT_STOP)
+from homeassistant.helpers.event import track_time_change
 from homeassistant.util import convert, slugify
 
 DOMAIN = "zwave"
@@ -23,27 +25,30 @@ DEFAULT_CONF_USB_STICK_PATH = "/zwaveusbstick"
 CONF_DEBUG = "debug"
 CONF_POLLING_INTERVAL = "polling_interval"
 CONF_POLLING_INTENSITY = "polling_intensity"
-DEFAULT_ZWAVE_CONFIG_PATH = os.path.join(sys.prefix, 'share',
-                                         'python-openzwave', 'config')
+CONF_AUTOHEAL = "autoheal"
+DEFAULT_CONF_AUTOHEAL = True
+
+# How long to wait for the zwave network to be ready.
+NETWORK_READY_WAIT_SECS = 30
 
 SERVICE_ADD_NODE = "add_node"
 SERVICE_REMOVE_NODE = "remove_node"
-
-DISCOVER_SENSORS = "zwave.sensors"
-DISCOVER_SWITCHES = "zwave.switch"
-DISCOVER_LIGHTS = "zwave.light"
-DISCOVER_BINARY_SENSORS = 'zwave.binary_sensor'
+SERVICE_HEAL_NETWORK = "heal_network"
+SERVICE_SOFT_RESET = "soft_reset"
+SERVICE_TEST_NETWORK = "test_network"
 
 EVENT_SCENE_ACTIVATED = "zwave.scene_activated"
 
 COMMAND_CLASS_SWITCH_MULTILEVEL = 38
-
+COMMAND_CLASS_DOOR_LOCK = 98
 COMMAND_CLASS_SWITCH_BINARY = 37
 COMMAND_CLASS_SENSOR_BINARY = 48
 COMMAND_CLASS_SENSOR_MULTILEVEL = 49
 COMMAND_CLASS_METER = 50
 COMMAND_CLASS_BATTERY = 128
 COMMAND_CLASS_ALARM = 113  # 0x71
+COMMAND_CLASS_THERMOSTAT_SETPOINT = 67  # 0x43
+COMMAND_CLASS_THERMOSTAT_FAN_MODE = 68  # 0x44
 
 GENRE_WHATEVER = None
 GENRE_USER = "User"
@@ -58,27 +63,35 @@ TYPE_DECIMAL = "Decimal"
 # value type).
 DISCOVERY_COMPONENTS = [
     ('sensor',
-     DISCOVER_SENSORS,
      [COMMAND_CLASS_SENSOR_MULTILEVEL,
       COMMAND_CLASS_METER,
       COMMAND_CLASS_ALARM],
      TYPE_WHATEVER,
      GENRE_USER),
     ('light',
-     DISCOVER_LIGHTS,
      [COMMAND_CLASS_SWITCH_MULTILEVEL],
      TYPE_BYTE,
      GENRE_USER),
     ('switch',
-     DISCOVER_SWITCHES,
      [COMMAND_CLASS_SWITCH_BINARY],
      TYPE_BOOL,
      GENRE_USER),
     ('binary_sensor',
-     DISCOVER_BINARY_SENSORS,
      [COMMAND_CLASS_SENSOR_BINARY],
      TYPE_BOOL,
-     GENRE_USER)
+     GENRE_USER),
+    ('thermostat',
+     [COMMAND_CLASS_THERMOSTAT_SETPOINT],
+     TYPE_WHATEVER,
+     GENRE_WHATEVER),
+    ('hvac',
+     [COMMAND_CLASS_THERMOSTAT_FAN_MODE],
+     TYPE_WHATEVER,
+     GENRE_WHATEVER),
+    ('lock',
+     [COMMAND_CLASS_DOOR_LOCK],
+     TYPE_BOOL,
+     GENRE_USER),
 ]
 
 
@@ -88,6 +101,8 @@ ATTR_VALUE_ID = "value_id"
 ATTR_SCENE_ID = "scene_id"
 
 NETWORK = None
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _obj_to_dict(obj):
@@ -149,6 +164,7 @@ def get_config_value(node, value_index):
         return get_config_value(node, value_index)
 
 
+# pylint: disable=R0914
 def setup(hass, config):
     """Setup Z-Wave.
 
@@ -157,20 +173,31 @@ def setup(hass, config):
     # pylint: disable=global-statement, import-error
     global NETWORK
 
+    try:
+        import libopenzwave
+    except ImportError:
+        _LOGGER.error("You are missing required dependency Python Open "
+                      "Z-Wave. Please follow instructions at: "
+                      "https://home-assistant.io/components/zwave/")
+        return False
     from pydispatch import dispatcher
     from openzwave.option import ZWaveOption
     from openzwave.network import ZWaveNetwork
 
+    default_zwave_config_path = os.path.join(os.path.dirname(
+        libopenzwave.__file__), 'config')
+
     # Load configuration
     use_debug = str(config[DOMAIN].get(CONF_DEBUG)) == '1'
     customize = config[DOMAIN].get(CONF_CUSTOMIZE, {})
+    autoheal = config[DOMAIN].get(CONF_AUTOHEAL, DEFAULT_CONF_AUTOHEAL)
 
     # Setup options
     options = ZWaveOption(
         config[DOMAIN].get(CONF_USB_STICK_PATH, DEFAULT_CONF_USB_STICK_PATH),
         user_path=hass.config.config_dir,
         config_path=config[DOMAIN].get('config_path',
-                                       DEFAULT_ZWAVE_CONFIG_PATH),)
+                                       default_zwave_config_path),)
 
     options.set_console_output(use_debug)
     options.lock()
@@ -193,7 +220,6 @@ def setup(hass, config):
     def value_added(node, value):
         """Called when a value is added to a node on the network."""
         for (component,
-             discovery_service,
              command_ids,
              value_type,
              value_genre) in DISCOVERY_COMPONENTS:
@@ -205,26 +231,21 @@ def setup(hass, config):
             if value_genre is not None and value_genre != value.genre:
                 continue
 
-            # Ensure component is loaded
-            bootstrap.setup_component(hass, component, config)
-
             # Configure node
             name = "{}.{}".format(component, _object_id(value))
 
             node_config = customize.get(name, {})
             polling_intensity = convert(
                 node_config.get(CONF_POLLING_INTENSITY), int)
-            if polling_intensity is not None:
+            if polling_intensity:
                 value.enable_poll(polling_intensity)
+            else:
+                value.disable_poll()
 
-            # Fire discovery event
-            hass.bus.fire(EVENT_PLATFORM_DISCOVERED, {
-                ATTR_SERVICE: discovery_service,
-                ATTR_DISCOVERED: {
-                    ATTR_NODE_ID: node.node_id,
-                    ATTR_VALUE_ID: value.value_id,
-                }
-            })
+            discovery.load_platform(hass, component, DOMAIN, {
+                ATTR_NODE_ID: node.node_id,
+                ATTR_VALUE_ID: value.value_id,
+            }, config)
 
     def scene_activated(node, scene_id):
         """Called when a scene is activated on any node in the network."""
@@ -241,13 +262,26 @@ def setup(hass, config):
     dispatcher.connect(
         scene_activated, ZWaveNetwork.SIGNAL_SCENE_EVENT, weak=False)
 
-    def add_node(event):
+    def add_node(service):
         """Switch into inclusion mode."""
         NETWORK.controller.begin_command_add_device()
 
-    def remove_node(event):
+    def remove_node(service):
         """Switch into exclusion mode."""
         NETWORK.controller.begin_command_remove_device()
+
+    def heal_network(service):
+        """Heal the network."""
+        _LOGGER.info("ZWave heal running.")
+        NETWORK.heal()
+
+    def soft_reset(service):
+        """Soft reset the controller."""
+        NETWORK.controller.soft_reset()
+
+    def test_network(service):
+        """Test the network by sending commands to all the nodes."""
+        NETWORK.test()
 
     def stop_zwave(event):
         """Stop Z-Wave."""
@@ -257,10 +291,30 @@ def setup(hass, config):
         """Startup Z-Wave."""
         NETWORK.start()
 
+        # Need to be in STATE_AWAKED before talking to nodes.
+        # Wait up to NETWORK_READY_WAIT_SECS seconds for the zwave network
+        # to be ready.
+        for i in range(NETWORK_READY_WAIT_SECS):
+            _LOGGER.debug(
+                "network state: %d %s", NETWORK.state, NETWORK.state_str)
+            if NETWORK.state >= NETWORK.STATE_AWAKED:
+                _LOGGER.info("zwave ready after %d seconds", i)
+                break
+            time.sleep(1)
+        else:
+            _LOGGER.warning(
+                "zwave not ready after %d seconds, continuing anyway",
+                NETWORK_READY_WAIT_SECS)
+            _LOGGER.info(
+                "final network state: %d %s", NETWORK.state, NETWORK.state_str)
+
         polling_interval = convert(
             config[DOMAIN].get(CONF_POLLING_INTERVAL), int)
         if polling_interval is not None:
             NETWORK.set_poll_interval(polling_interval, False)
+
+        poll_interval = NETWORK.get_poll_interval()
+        _LOGGER.info("zwave polling interval set to %d ms", poll_interval)
 
         hass.bus.listen_once(EVENT_HOMEASSISTANT_STOP, stop_zwave)
 
@@ -268,6 +322,14 @@ def setup(hass, config):
         # hardware inclusion button
         hass.services.register(DOMAIN, SERVICE_ADD_NODE, add_node)
         hass.services.register(DOMAIN, SERVICE_REMOVE_NODE, remove_node)
+        hass.services.register(DOMAIN, SERVICE_HEAL_NETWORK, heal_network)
+        hass.services.register(DOMAIN, SERVICE_SOFT_RESET, soft_reset)
+        hass.services.register(DOMAIN, SERVICE_TEST_NETWORK, test_network)
+
+    # Setup autoheal
+    if autoheal:
+        _LOGGER.info("ZWave network autoheal is enabled.")
+        track_time_change(hass, heal_network, hour=0, minute=0, second=0)
 
     hass.bus.listen_once(EVENT_HOMEASSISTANT_START, start_zwave)
 

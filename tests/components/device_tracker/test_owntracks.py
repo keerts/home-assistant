@@ -55,6 +55,21 @@ LOCATION_MESSAGE_INACCURATE = {
     'tst': 1,
     'vel': 0}
 
+LOCATION_MESSAGE_ZERO_ACCURACY = {
+    'batt': 92,
+    'cog': 248,
+    'tid': 'user',
+    'lon': 2.0,
+    't': 'u',
+    'alt': 27,
+    'acc': 0,
+    'p': 101.3977584838867,
+    'vac': 4,
+    'lat': 6.0,
+    '_type': 'location',
+    'tst': 1,
+    'vel': 0}
+
 REGION_ENTER_MESSAGE = {
     'lon': 1.0,
     'event': 'enter',
@@ -133,15 +148,6 @@ class TestDeviceTrackerOwnTracks(unittest.TestCase):
                 'radius': 100000
             })
 
-        self.hass.states.set(
-            'zone.passive', 'zoning',
-            {
-                'name': 'zone',
-                'latitude': 3.0,
-                'longitude': 1.0,
-                'radius': 10,
-                'passive': True
-            })
         # Clear state between teste
         self.hass.states.set(DEVICE_TRACKER_STATE, None)
         owntracks.REGIONS_ENTERED = defaultdict(list)
@@ -197,6 +203,13 @@ class TestDeviceTrackerOwnTracks(unittest.TestCase):
         state = self.hass.states.get(REGION_TRACKER_STATE)
         self.assertEqual(state.attributes.get('gps_accuracy'), accuracy)
 
+    def test_location_invalid_devid(self):
+        """Test the update of a location."""
+        self.send_message('owntracks/paulus/nexus-5x', LOCATION_MESSAGE)
+
+        state = self.hass.states.get('device_tracker.paulus_nexus5x')
+        assert state.state == 'outer'
+
     def test_location_update(self):
         """Test the update of a location."""
         self.send_message(LOCATION_TOPIC, LOCATION_MESSAGE)
@@ -209,6 +222,14 @@ class TestDeviceTrackerOwnTracks(unittest.TestCase):
         """Test the location for inaccurate GPS information."""
         self.send_message(LOCATION_TOPIC, LOCATION_MESSAGE)
         self.send_message(LOCATION_TOPIC, LOCATION_MESSAGE_INACCURATE)
+
+        self.assert_location_latitude(2.0)
+        self.assert_location_longitude(1.0)
+
+    def test_location_zero_accuracy_gps(self):
+        """Ignore the location for zero accuracy GPS information."""
+        self.send_message(LOCATION_TOPIC, LOCATION_MESSAGE)
+        self.send_message(LOCATION_TOPIC, LOCATION_MESSAGE_ZERO_ACCURACY)
 
         self.assert_location_latitude(2.0)
         self.assert_location_longitude(1.0)
@@ -235,6 +256,20 @@ class TestDeviceTrackerOwnTracks(unittest.TestCase):
         self.assert_location_latitude(2.0)
         self.assert_location_accuracy(60.0)
         self.assert_location_state('outer')
+
+        # Left clean zone state
+        self.assertFalse(owntracks.REGIONS_ENTERED[USER])
+
+    def test_event_with_spaces(self):
+        """Test the entry event."""
+        message = REGION_ENTER_MESSAGE.copy()
+        message['desc'] = "inner 2"
+        self.send_message(EVENT_TOPIC, message)
+        self.assert_location_state('inner_2')
+
+        message = REGION_LEAVE_MESSAGE.copy()
+        message['desc'] = "inner 2"
+        self.send_message(EVENT_TOPIC, message)
 
         # Left clean zone state
         self.assertFalse(owntracks.REGIONS_ENTERED[USER])
@@ -324,43 +359,6 @@ class TestDeviceTrackerOwnTracks(unittest.TestCase):
         message['desc'] = "inner_2"
         self.send_message(EVENT_TOPIC, message)
         self.assert_location_state('outer')
-
-    def test_event_entry_exit_passive_zone(self):
-        """Test the event for passive zone exits."""
-        # Enter passive zone
-        message = REGION_ENTER_MESSAGE.copy()
-        message['desc'] = "passive"
-        self.send_message(EVENT_TOPIC, message)
-
-        # Should pick up gps put not zone
-        self.assert_location_state('not_home')
-        self.assert_location_latitude(3.0)
-        self.assert_location_accuracy(10.0)
-
-        # Enter inner2 zone
-        message = REGION_ENTER_MESSAGE.copy()
-        message['desc'] = "inner_2"
-        self.send_message(EVENT_TOPIC, message)
-        self.assert_location_state('inner_2')
-        self.assert_location_latitude(2.1)
-        self.assert_location_accuracy(10.0)
-
-        # Exit inner_2 - should be in 'passive'
-        # ie gps co-ords - but not zone
-        message = REGION_LEAVE_MESSAGE.copy()
-        message['desc'] = "inner_2"
-        self.send_message(EVENT_TOPIC, message)
-        self.assert_location_state('not_home')
-        self.assert_location_latitude(3.0)
-        self.assert_location_accuracy(10.0)
-
-        # Exit passive - should be in 'outer'
-        message = REGION_LEAVE_MESSAGE.copy()
-        message['desc'] = "passive"
-        self.send_message(EVENT_TOPIC, message)
-        self.assert_location_state('outer')
-        self.assert_location_latitude(2.0)
-        self.assert_location_accuracy(60.0)
 
     def test_event_entry_unknown_zone(self):
         """Test the event for unknown zone."""
