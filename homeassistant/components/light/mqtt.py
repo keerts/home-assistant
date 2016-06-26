@@ -16,7 +16,8 @@ from homeassistant.const import CONF_NAME, CONF_OPTIMISTIC, CONF_VALUE_TEMPLATE
 from homeassistant.components.mqtt import (
     CONF_STATE_TOPIC, CONF_COMMAND_TOPIC, CONF_QOS, CONF_RETAIN)
 import homeassistant.helpers.config_validation as cv
-from homeassistant.helpers.template import render_with_possible_json_value
+from homeassistant.helpers.template import (
+    render_with_possible_json_value, render )
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ DEPENDENCIES = ['mqtt']
 CONF_STATE_VALUE_TEMPLATE = 'state_value_template'
 CONF_BRIGHTNESS_STATE_TOPIC = 'brightness_state_topic'
 CONF_BRIGHTNESS_COMMAND_TOPIC = 'brightness_command_topic'
+CONF_PAYLOAD_BRIGHTNESS_VALUE_TEMPLATE = 'payload_brightness_value_template'
 CONF_BRIGHTNESS_VALUE_TEMPLATE = 'brightness_value_template'
 CONF_RGB_STATE_TOPIC = 'rgb_state_topic'
 CONF_RGB_COMMAND_TOPIC = 'rgb_command_topic'
@@ -36,6 +38,7 @@ CONF_BRIGHTNESS_SCALE = 'brightness_scale'
 DEFAULT_NAME = 'MQTT Light'
 DEFAULT_PAYLOAD_ON = 'ON'
 DEFAULT_PAYLOAD_OFF = 'OFF'
+DEFAULT_PAYLOAD_BRIGHTNESS_VALUE_TEMPLATE = '{{ brightness }}'
 DEFAULT_OPTIMISTIC = False
 DEFAULT_BRIGHTNESS_SCALE = 255
 
@@ -50,6 +53,8 @@ PLATFORM_SCHEMA = mqtt.MQTT_RW_PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_RGB_VALUE_TEMPLATE): cv.template,
     vol.Optional(CONF_PAYLOAD_ON, default=DEFAULT_PAYLOAD_ON): cv.string,
     vol.Optional(CONF_PAYLOAD_OFF, default=DEFAULT_PAYLOAD_OFF): cv.string,
+    vol.Optional(CONF_PAYLOAD_BRIGHTNESS_VALUE_TEMPLATE,
+        default=DEFAULT_PAYLOAD_BRIGHTNESS_VALUE_TEMPLATE): cv.string,
     vol.Optional(CONF_OPTIMISTIC, default=DEFAULT_OPTIMISTIC): cv.boolean,
     vol.Optional(CONF_BRIGHTNESS_SCALE, default=DEFAULT_BRIGHTNESS_SCALE):
         vol.All(vol.Coerce(int), vol.Range(min=1)),
@@ -83,6 +88,8 @@ def setup_platform(hass, config, add_devices_callback, discovery_info=None):
         {
             'on': config[CONF_PAYLOAD_ON],
             'off': config[CONF_PAYLOAD_OFF],
+            'brightness':
+                config.get(CONF_PAYLOAD_BRIGHTNESS_VALUE_TEMPLATE),
         },
         config[CONF_OPTIMISTIC],
         config[CONF_BRIGHTNESS_SCALE],
@@ -207,8 +214,12 @@ class MqttLight(Light):
            self._topic["brightness_command_topic"] is not None:
             percent_bright = float(kwargs[ATTR_BRIGHTNESS]) / 255
             device_brightness = int(percent_bright * self._brightness_scale)
+            template_vars = dict()
+            template_vars['brightness'] = device_brightness
+            payload = render(self.hass, self._payload['brightness'],
+                    template_vars)
             mqtt.publish(self._hass, self._topic["brightness_command_topic"],
-                         device_brightness, self._qos, self._retain)
+                         payload, self._qos, self._retain)
 
             if self._optimistic_brightness:
                 self._brightness = kwargs[ATTR_BRIGHTNESS]
