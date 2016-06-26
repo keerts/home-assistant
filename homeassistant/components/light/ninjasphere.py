@@ -21,17 +21,16 @@ class Light(dict):
                 self.add_field('name', thing.device.name + " " + channel.id)
                 self.add_field('state_topic', channel.topic)
                 self.add_field('command_topic', channel.topic)
-                self.add_field('state_value_template', '{{ ' +
-                        self.payload_constructor('turnOn') +  ' }}')
-                self.add_field(
-                    'payload_on', self.payload_constructor('turnOn'))
-                self.add_field(
-                    'payload_off', self.payload_constructor('turnOff'))
+                self.add_field('state_value_template', '{{ value_json.method }}')
+                self.add_field('state_message_template',
+                        self.payload_constructor('{{ payload }}'))
+                self.add_field('payload_on', 'turnOn')
+                self.add_field('payload_off', 'turnOff')
             elif channel.protocol == 'brightness':
                 self.add_field('brightness_state_topic', channel.topic)
                 self.add_field('brightness_command_topic', channel.topic)
-                self.add_field('payload_brightness_value_template', self.payload_constructor(
-                    'set', '{{ brightness }}'))
+                self.add_field('brightness_message_template', self.payload_constructor(
+                    'set', '{{ payload }}'))
                 self.add_field('brightness_value_template',
                                '{{ value_json.params[0] }}')
 
